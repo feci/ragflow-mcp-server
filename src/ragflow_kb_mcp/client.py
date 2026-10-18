@@ -1,0 +1,101 @@
+"""Thin async client for the RAGFlow HTTP API (``/api/v1``)."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import httpx
+
+
+class RagflowError(RuntimeError):
+    """RAGFlow returned an error code or a response this client cannot read."""
+
+    def __init__(self, message: str, *, code: int | None = None, data: Any = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
+
+
+def _clean_params(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not params:
+        return None
+    out: dict[str, Any] = {}
+    for key, value in params.items():
+        if value is None:
+            continue
+        out[key] = ("true" if value else "false") if isinstance(value, bool) else value
+    return out
+
+
+class RagflowClient:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        *,
+        timeout: float = 120.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        base = base_url.rstrip("/")
+        if not base.endswith("/api/v1"):
+            base += "/api/v1"
+        self._http = httpx.AsyncClient(
+            base_url=base,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+            transport=transport,
+        )
+
+    async def aclose(self) -> None:
+        await self._http.aclose()
+
+    async def call(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any = None,
+        data: dict[str, Any] | None = None,
+        files: Any = None,
+        full: bool = False,
+    ) -> Any:
+        """Send a request and return its ``data`` field (or the whole body with ``full``)."""
+        resp = await self._http.request(
+            method, path, params=_clean_params(params), json=json, data=data, files=files
+        )
+        body = self._json_body(resp, method, path)
+        code = body.get("code", 0 if resp.is_success else resp.status_code)
+        if code != 0:
+            message = body.get("message") or body.get("error") or "unknown error"
+            raise RagflowError(
+                f"{method} {path}: RAGFlow code {code}: {message}",
+                code=code,
+                data=body.get("data"),
+            )
+        return body if full else body.get("data")
+
+    async def download(self, path: str) -> tuple[bytes, str]:
+        """Fetch a raw file. RAGFlow reports errors for downloads as a JSON body."""
+        resp = await self._http.get(path)
+        content_type = resp.headers.get("content-type", "")
+        if content_type.startswith("application/json"):
+            body = self._json_body(resp, "GET", path)
+            if body.get("code", 0) != 0:
+                message = body.get("message") or "unknown error"
+                raise RagflowError(f"GET {path}: RAGFlow code {body.get('code')}: {message}")
+        if not resp.is_success:
+            raise RagflowError(f"GET {path}: HTTP {resp.status_code}")
+        return resp.content, content_type
+
+    @staticmethod
+    def _json_body(resp: httpx.Response, method: str, path: str) -> dict[str, Any]:
+        try:
+            body = resp.json()
+        except ValueError:
+            raise RagflowError(
+                f"{method} {path}: HTTP {resp.status_code} with a non-JSON response"
+            ) from None
+        if not isinstance(body, dict):
+            raise RagflowError(f"{method} {path}: unexpected response shape")
+        return body
