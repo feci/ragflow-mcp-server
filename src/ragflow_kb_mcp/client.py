@@ -75,18 +75,36 @@ class RagflowClient:
             )
         return body if full else body.get("data")
 
-    async def download(self, path: str) -> tuple[bytes, str]:
-        """Fetch a raw file. RAGFlow reports errors for downloads as a JSON body."""
-        resp = await self._http.get(path)
+    async def raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: Any = None,
+        data: dict[str, Any] | None = None,
+        files: Any = None,
+    ) -> tuple[bytes, str]:
+        """Send a request whose success answer is a file. RAGFlow reports errors as JSON."""
+        resp = await self._http.request(
+            method, path, params=_clean_params(params), json=json, data=data, files=files
+        )
         content_type = resp.headers.get("content-type", "")
         if content_type.startswith("application/json"):
-            body = self._json_body(resp, "GET", path)
+            body = self._json_body(resp, method, path)
             if body.get("code", 0) != 0:
                 message = body.get("message") or "unknown error"
-                raise RagflowError(f"GET {path}: RAGFlow code {body.get('code')}: {message}")
+                raise RagflowError(
+                    f"{method} {path}: RAGFlow code {body.get('code')}: {message}",
+                    code=body.get("code"),
+                    data=body.get("data"),
+                )
         if not resp.is_success:
-            raise RagflowError(f"GET {path}: HTTP {resp.status_code}")
+            raise RagflowError(f"{method} {path}: HTTP {resp.status_code}")
         return resp.content, content_type
+
+    async def download(self, path: str, params: dict[str, Any] | None = None) -> tuple[bytes, str]:
+        return await self.raw("GET", path, params=params)
 
     @staticmethod
     def _json_body(resp: httpx.Response, method: str, path: str) -> dict[str, Any]:
