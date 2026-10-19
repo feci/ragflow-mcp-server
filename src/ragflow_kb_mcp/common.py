@@ -23,15 +23,18 @@ DELETE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint
 DEFAULT_MAX_CHARS = 20_000
 MAX_BASE64_BYTES = 5 * 1024 * 1024
 
-DatasetId = Annotated[str, Field(description="Dataset (knowledge base) ID")]
-DocumentId = Annotated[str, Field(description="Document ID")]
-ChatId = Annotated[str, Field(description="Chat assistant ID")]
-AgentId = Annotated[str, Field(description="Agent ID")]
-SessionId = Annotated[str, Field(description="Session ID")]
-MemoryId = Annotated[str, Field(description="Memory ID")]
-FileId = Annotated[str, Field(description="File or folder ID in the RAGFlow file manager")]
-SearchId = Annotated[str, Field(description="Search app ID")]
-WorkspaceId = Annotated[str, Field(description="Workspace ID")]
+# IDs are interpolated into request paths, so they may not contain / ? # or spaces.
+ID_PATTERN = r"^[A-Za-z0-9_.:@+=-]+$"
+
+DatasetId = Annotated[str, Field(pattern=ID_PATTERN, description="Dataset (knowledge base) ID")]
+DocumentId = Annotated[str, Field(pattern=ID_PATTERN, description="Document ID")]
+ChatId = Annotated[str, Field(pattern=ID_PATTERN, description="Chat assistant ID")]
+AgentId = Annotated[str, Field(pattern=ID_PATTERN, description="Agent ID")]
+SessionId = Annotated[str, Field(pattern=ID_PATTERN, description="Session ID")]
+MemoryId = Annotated[str, Field(pattern=ID_PATTERN, description="Memory ID")]
+FileId = Annotated[str, Field(pattern=ID_PATTERN, description="File or folder ID in the RAGFlow file manager")]
+SearchId = Annotated[str, Field(pattern=ID_PATTERN, description="Search app ID")]
+WorkspaceId = Annotated[str, Field(pattern=ID_PATTERN, description="Workspace ID")]
 Page = Annotated[int, Field(ge=1, description="Page number, starting at 1")]
 PageSize = Annotated[int, Field(ge=1, le=1000, description="Items per page")]
 MaxChars = Annotated[

@@ -13,6 +13,7 @@ from pydantic import Field
 
 from ..client import RagflowError
 from ..common import (
+    ID_PATTERN,
     DELETE,
     READ,
     UPLOAD,
@@ -104,6 +105,9 @@ def _chunk(c: dict[str, Any]) -> dict[str, Any]:
     for key in ("available", "positions"):
         if c.get(key) not in (None, []):
             out[key] = c[key]
+    if "available" not in out and c.get("available_int") is not None:
+        # Getting a single chunk returns the stored available_int (0/1) instead.
+        out["available"] = bool(int(c["available_int"]))
     return out
 
 
@@ -117,8 +121,12 @@ def _retrieved(c: dict[str, Any]) -> dict[str, Any]:
 
 def _is_terminal(doc: dict[str, Any]) -> bool:
     status = str(doc.get("ingestion_status") or "").upper()
+    if status:
+        # RAGFlow 1.0 reports progress 1 while the status is still RUNNING and the
+        # chunks are not written yet, so the status decides when one is given.
+        return status in TERMINAL_STATUSES
     progress = doc.get("progress") or 0
-    return status in TERMINAL_STATUSES or progress >= 1 or progress < 0
+    return progress >= 1 or progress < 0
 
 
 
@@ -170,14 +178,30 @@ def register(ctx: Context) -> None:
     @tool(READ)
     async def ragflow_list_datasets(
         name: Annotated[str | None, Field(description="Exact dataset name filter")] = None,
+        keywords: Annotated[str | None, Field(description="Match dataset names")] = None,
+        dataset_id: Annotated[str | None, Field(description="Return only this dataset")] = None,
+        parser_id: Annotated[
+            str | None, Field(description="Only datasets with this chunking method")
+        ] = None,
         page: Page = 1,
         page_size: PageSize = 30,
+        orderby: Literal["create_time", "update_time"] = "create_time",
+        desc: bool = True,
     ) -> dict[str, Any]:
         """List datasets (knowledge bases) with IDs, descriptions and document/chunk counts."""
         body = await client.call(
             "GET",
             "/datasets",
-            params={"name": name, "page": page, "page_size": page_size},
+            params={
+                "name": name,
+                "keywords": keywords,
+                "id": dataset_id,
+                "parser_id": parser_id,
+                "page": page,
+                "page_size": page_size,
+                "orderby": orderby,
+                "desc": desc,
+            },
             full=True,
         )
         items = body.get("data") or []
@@ -524,6 +548,37 @@ def register(ctx: Context) -> None:
         await client.call("DELETE", f"/datasets/{dataset_id}/chunks", json={"document_ids": ids})
         return {"stopped": ids}
 
+    @tool(DELETE)
+    async def ragflow_ingest_documents(
+        document_ids: Annotated[list[str], Field(description="IDs of the documents")],
+        action: Annotated[
+            Literal["start", "rerun", "cancel", "clear"],
+            Field(
+                description="start: parse documents not parsed yet; rerun: delete existing "
+                "chunks and parse again; cancel: stop a running parse; clear: delete the "
+                "parse results without parsing again"
+            ),
+        ],
+        apply_dataset_config: Annotated[
+            bool,
+            Field(description="Copy the dataset's parser settings to the documents first"),
+        ] = False,
+    ) -> dict[str, Any]:
+        """Start, rerun, cancel or clear ingestion of documents; also parses datasets that use an ingestion pipeline."""
+        ids = non_empty("document_ids", document_ids)
+        run, delete = {
+            "start": ("1", False),
+            "rerun": ("1", True),
+            "cancel": ("2", False),
+            "clear": ("0", True),
+        }[action]
+        await client.call(
+            "POST",
+            "/documents/ingest",
+            json={"doc_ids": ids, "run": run, "delete": delete, "apply_kb": apply_dataset_config},
+        )
+        return {"action": action, "document_ids": ids}
+
     # Chunks
 
     @tool(READ)
@@ -549,6 +604,34 @@ def register(ctx: Context) -> None:
         if isinstance(data.get("doc"), dict):
             result["document"] = _document(data["doc"])
         return result
+
+    @tool(READ)
+    async def ragflow_get_chunk(
+        dataset_id: DatasetId,
+        document_id: DocumentId,
+        chunk_id: Annotated[str, Field(pattern=ID_PATTERN, description="Chunk ID")],
+    ) -> dict[str, Any]:
+        """Get one chunk with its text, keywords, questions and availability."""
+        data = await client.call(
+            "GET", f"/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}"
+        )
+        return _chunk(data or {})
+
+    @tool(WRITE)
+    async def ragflow_set_chunks_availability(
+        dataset_id: DatasetId,
+        document_id: DocumentId,
+        chunk_ids: Annotated[list[str], Field(description="IDs of the chunks to switch")],
+        available: Annotated[bool, Field(description="Whether retrieval may return them")],
+    ) -> dict[str, Any]:
+        """Switch many chunks of a document on or off for retrieval at once."""
+        ids = non_empty("chunk_ids", chunk_ids)
+        await client.call(
+            "PATCH",
+            f"/datasets/{dataset_id}/documents/{document_id}/chunks",
+            json={"chunk_ids": ids, "available": available},
+        )
+        return {"chunk_ids": ids, "available": available}
 
     @tool(WRITE)
     async def ragflow_add_chunk(
@@ -576,7 +659,7 @@ def register(ctx: Context) -> None:
     async def ragflow_update_chunk(
         dataset_id: DatasetId,
         document_id: DocumentId,
-        chunk_id: Annotated[str, Field(description="Chunk ID")],
+        chunk_id: Annotated[str, Field(pattern=ID_PATTERN, description="Chunk ID")],
         content: str | None = None,
         important_keywords: list[str] | None = None,
         questions: list[str] | None = None,

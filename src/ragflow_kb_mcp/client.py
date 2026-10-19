@@ -49,6 +49,23 @@ class RagflowClient:
     async def aclose(self) -> None:
         await self._http.aclose()
 
+    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        # IDs from tool arguments are interpolated into the path; refuse anything that
+        # would leave the intended endpoint.
+        if "?" in path or "#" in path or any(seg in ("", ".", "..") for seg in path.split("/")[1:]):
+            raise RagflowError(f"refusing request path {path!r}: IDs must not be empty or contain / ? # or ..")
+        try:
+            return await self._http.request(method, path, **kwargs)
+        except httpx.TimeoutException:
+            raise RagflowError(
+                f"{method} {path}: no answer within the client timeout (RAGFLOW_TIMEOUT); "
+                "RAGFlow may still be working on it"
+            ) from None
+        except httpx.HTTPError as exc:
+            raise RagflowError(
+                f"{method} {path}: request failed: {type(exc).__name__}: {exc}"
+            ) from None
+
     async def call(
         self,
         method: str,
@@ -61,7 +78,7 @@ class RagflowClient:
         full: bool = False,
     ) -> Any:
         """Send a request and return its ``data`` field (or the whole body with ``full``)."""
-        resp = await self._http.request(
+        resp = await self._send(
             method, path, params=_clean_params(params), json=json, data=data, files=files
         )
         body = self._json_body(resp, method, path)
@@ -86,7 +103,7 @@ class RagflowClient:
         files: Any = None,
     ) -> tuple[bytes, str]:
         """Send a request whose success answer is a file. RAGFlow reports errors as JSON."""
-        resp = await self._http.request(
+        resp = await self._send(
             method, path, params=_clean_params(params), json=json, data=data, files=files
         )
         content_type = resp.headers.get("content-type", "")
@@ -105,6 +122,11 @@ class RagflowClient:
 
     async def download(self, path: str, params: dict[str, Any] | None = None) -> tuple[bytes, str]:
         return await self.raw("GET", path, params=params)
+
+    async def json_with_status(self, method: str, path: str) -> tuple[int, dict[str, Any]]:
+        """Return the HTTP status and JSON body without treating error statuses as failures."""
+        resp = await self._send(method, path)
+        return resp.status_code, self._json_body(resp, method, path)
 
     @staticmethod
     def _json_body(resp: httpx.Response, method: str, path: str) -> dict[str, Any]:

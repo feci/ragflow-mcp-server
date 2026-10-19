@@ -4,6 +4,8 @@ import json
 import httpx
 import pytest
 from conftest import call, doc, make_server, ok, payload
+from ragflow_kb_mcp.client import RagflowClient
+from ragflow_kb_mcp.server import build_server
 from mcp.shared.memory import create_connected_server_and_client_session
 
 
@@ -43,7 +45,7 @@ async def test_create_dataset_sets_parse_type_and_description(fake):
 
 
 async def test_upload_text_parses_and_waits(fake):
-    states = iter([doc(status="SCHEDULED"), doc(status="RUNNING"), doc(status="COMPLETED", progress=1)])
+    states = iter([doc(status="SCHEDULED"), doc(status="RUNNING", progress=1), doc(status="COMPLETED", progress=1)])
     listing = {"n": 0}
 
     def documents(request):
@@ -282,3 +284,92 @@ async def test_name_filter_without_match_is_empty(fake):
     )
     result = payload(await call(make_server(fake), "ragflow_list_documents", {"dataset_id": "k1", "name": "x.md"}))
     assert result == {"total": 0, "documents": []}
+
+
+async def test_list_datasets_filters(fake):
+    fake.on("GET", "/datasets", ok([], total_datasets=0))
+    result = payload(
+        await call(
+            make_server(fake),
+            "ragflow_list_datasets",
+            {"dataset_id": "k1", "keywords": "infra", "parser_id": "general", "orderby": "update_time", "desc": False},
+        )
+    )
+    assert result == {"total": 0, "datasets": []}
+    params = fake.requests[0].url.params
+    assert params["id"] == "k1" and params["keywords"] == "infra" and params["parser_id"] == "general"
+    assert params["orderby"] == "update_time" and params["desc"] == "false"
+    assert "include_parsing_status" not in params
+
+
+async def test_get_chunk(fake):
+    fake.on(
+        "GET",
+        "/datasets/k1/documents/d1/chunks/c1",
+        ok({"id": "c1", "content_with_weight": "text", "important_kwd": ["k"], "available_int": 0}),
+    )
+    result = payload(
+        await call(make_server(fake), "ragflow_get_chunk", {"dataset_id": "k1", "document_id": "d1", "chunk_id": "c1"})
+    )
+    assert result == {"id": "c1", "content": "text", "important_keywords": ["k"], "available": False}
+
+
+async def test_set_chunks_availability(fake):
+    fake.on("PATCH", "/datasets/k1/documents/d1/chunks", ok(True))
+    server = make_server(fake)
+    result = payload(
+        await call(
+            server,
+            "ragflow_set_chunks_availability",
+            {"dataset_id": "k1", "document_id": "d1", "chunk_ids": ["c1", "c2"], "available": False},
+        )
+    )
+    assert result == {"chunk_ids": ["c1", "c2"], "available": False}
+    assert json.loads(fake.sent("PATCH", "/datasets/k1/documents/d1/chunks")[0].content) == {
+        "chunk_ids": ["c1", "c2"],
+        "available": False,
+    }
+    empty = await call(
+        server,
+        "ragflow_set_chunks_availability",
+        {"dataset_id": "k1", "document_id": "d1", "chunk_ids": [], "available": True},
+    )
+    assert empty.isError
+
+
+@pytest.mark.parametrize(
+    "action, run, delete",
+    [("start", "1", False), ("rerun", "1", True), ("cancel", "2", False), ("clear", "0", True)],
+)
+async def test_ingest_documents_actions(fake, action, run, delete):
+    fake.on("POST", "/documents/ingest", ok(True))
+    result = payload(
+        await call(make_server(fake), "ragflow_ingest_documents", {"document_ids": ["d1"], "action": action})
+    )
+    assert result == {"action": action, "document_ids": ["d1"]}
+    assert json.loads(fake.sent("POST", "/documents/ingest")[0].content) == {
+        "doc_ids": ["d1"],
+        "run": run,
+        "delete": delete,
+        "apply_kb": False,
+    }
+
+
+async def test_path_ids_cannot_escape_the_endpoint(fake):
+    server = make_server(fake)
+    for bad in ("../chats", "a/b", "x?y=1", ""):
+        result = await call(server, "ragflow_get_dataset", {"dataset_id": bad})
+        assert result.isError
+        text = result.content[0].text
+        assert "refusing request path" in text or "should match pattern" in text, text
+    assert not fake.requests
+
+
+async def test_timeout_becomes_readable_tool_error():
+    def slow(request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    client = RagflowClient("https://rag.example", "k", transport=httpx.MockTransport(slow))
+    server = build_server(client)
+    result = await call(server, "ragflow_get_dataset", {"dataset_id": "k1"})
+    assert result.isError and "no answer within the client timeout" in result.content[0].text

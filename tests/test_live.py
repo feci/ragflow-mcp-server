@@ -155,7 +155,7 @@ async def test_parsing_chunks_and_retrieval():
             wait_seconds=300,
         )
         doc = up["document"]
-        assert doc["ingestion_status"] == "COMPLETED", doc
+        assert doc["ingestion_status"] == "COMPLETED", repr(doc)[:1500]
         doc_id = doc["id"]
 
         chunks = await call("ragflow_list_chunks", dataset_id=dataset_id, document_id=doc_id)
