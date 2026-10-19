@@ -373,3 +373,33 @@ async def test_timeout_becomes_readable_tool_error():
     server = build_server(client)
     result = await call(server, "ragflow_get_dataset", {"dataset_id": "k1"})
     assert result.isError and "no answer within the client timeout" in result.content[0].text
+
+
+async def test_url_upload_checks_the_names_ragflow_stores(fake):
+    seen = []
+
+    def documents(request):
+        name = request.url.params.get("name")
+        if name:
+            seen.append(name)
+            return ok({"docs": [doc("old", name="mypage.html")] if name == "mypage.html" else [], "total": 0})
+        return ok({"docs": [doc("new", name="mypage.html")], "total": 1})
+
+    fake.on("GET", "/datasets/k1/documents", documents)
+    result = await call(
+        make_server(fake), "ragflow_upload_document", {"dataset_id": "k1", "url": "https://e.x/p", "filename": "my page"}
+    )
+    assert result.isError and "already exists" in result.content[0].text
+    assert seen == ["mypage", "mypage.pdf", "mypage.html"]
+
+
+async def test_url_upload_of_other_types_explains_the_limit(fake):
+    fake.on("GET", "/datasets/k1/documents", ok({"docs": [], "total": 0}))
+    fake.on("POST", "/datasets/k1/documents", {"code": 102, "message": "this type of file has not been supported yet"})
+    result = await call(
+        make_server(fake),
+        "ragflow_upload_document",
+        {"dataset_id": "k1", "url": "https://e.x/README.md", "filename": "README.md"},
+    )
+    assert result.isError
+    assert "only .pdf or .html" in result.content[0].text

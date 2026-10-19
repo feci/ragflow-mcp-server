@@ -59,7 +59,7 @@ only exists as a stream, so the server reads the stream and returns the final an
 - `text`: UTF-8 content such as Markdown notes. Needs a `filename` with an extension.
 - `content_base64`: file bytes. The bytes pass through the model's context, so use this
   only for small files.
-- `url`: RAGFlow downloads the file or page itself.
+- `url`: a PDF or a web page that RAGFlow downloads itself (see the note on names below).
 - `file_path`: a file on the machine that runs this server. This is off until the operator
   lists allowed directories in `RAGFLOW_UPLOAD_ROOTS`. Paths are resolved, including
   symlinks, before the check.
@@ -68,8 +68,13 @@ The file extension decides which RAGFlow parser runs. Parsing starts right after
 upload unless `parse` is false. Set `wait_seconds` (up to 600) to wait until
 `ingestion_status` is final. An existing document with the same name makes the upload fail
 unless you pass `replace_existing`; then the new file is uploaded first and the old one is
-deleted afterwards. For `url` uploads, include the extension in `filename`: RAGFlow adds one
-when it is missing, and the duplicate check compares the name you passed.
+deleted afterwards.
+
+For `url` uploads RAGFlow strips every character except letters, digits, `-` and `_` from
+the name, the dot of the extension included, and adds back only `.pdf` or `.html`. So
+`example page` is stored as `examplepage.html`, and any other file type from a URL (Markdown,
+text, Office files) is rejected. Upload those with `text` or `content_base64` instead. The
+duplicate check compares the names RAGFlow would store.
 
 `ragflow_upload_file`, `ragflow_upload_attachment`, `ragflow_upload_agent_file` and
 `ragflow_speech_to_text` accept `text`, `content_base64` or `file_path` the same way.
@@ -121,8 +126,11 @@ these cases.
   the chunks are written, so only the status says that parsing is finished.
 - A document `name` or `id` filter without a match returns error code 102 ("you don't own
   the document") instead of an empty list.
-- Upload with `?type=web` downloads any URL (a file or a page) on the RAGFlow side, so this
-  server never fetches remote content itself. Local uploads rename a duplicate to `name(1).md`.
+- Upload with `?type=web` downloads the URL on the RAGFlow side, so this server never
+  fetches remote content itself. The name is cleaned to `[A-Za-z0-9_-]`, which also removes
+  the extension's dot; only `.pdf` and `.html` are added back, so other file types are refused
+  with "this type of file has not been supported yet". Local uploads rename a duplicate to
+  `name(1).md`.
 - Ingest takes `doc_ids` and `run`: `"1"` starts, `"2"` cancels, any other value clears the
   chunks. It works on every dataset, not only on ingestion-pipeline ones.
 - Getting a single chunk returns raw storage fields (`available_int`, `docnm_kwd`); the chunk

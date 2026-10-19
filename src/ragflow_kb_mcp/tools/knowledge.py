@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 import time
 from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
@@ -128,6 +129,18 @@ def _is_terminal(doc: dict[str, Any]) -> bool:
     progress = doc.get("progress") or 0
     return progress >= 1 or progress < 0
 
+
+
+# RAGFlow cleans the name of a URL upload down to these characters (dots included) and
+# then adds back only .pdf or .html.
+_WEB_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_\-/]")
+
+
+def _web_document_names(name: str) -> list[str]:
+    """Names RAGFlow may store for a URL upload called ``name``."""
+    parts = [p for p in name.replace("\\", "/").strip("/").split("/") if p not in ("", ".", "..")]
+    base = "/".join(_WEB_NAME_UNSAFE.sub("", p) for p in parts)
+    return [base, base + ".pdf", base + ".html"]
 
 
 def register(ctx: Context) -> None:
@@ -338,7 +351,8 @@ def register(ctx: Context) -> None:
             Field(
                 description="Document name with an extension that sets the parser "
                 "(.md, .txt, .pdf, .docx, ...). Required for text and content_base64; "
-                "defaults to the file name for file_path and url."
+                "defaults to the file name for file_path and url. For url uploads RAGFlow "
+                "keeps only letters, digits, - and _ and adds .pdf or .html itself."
             ),
         ] = None,
         text: Annotated[
@@ -349,7 +363,11 @@ def register(ctx: Context) -> None:
         ] = None,
         url: Annotated[
             str | None,
-            Field(description="http(s) URL that RAGFlow downloads (a file or a web page)"),
+            Field(
+                description="http(s) URL of a PDF or a web page; RAGFlow downloads it itself. "
+                "Other file types from a URL are rejected by RAGFlow: send them as text or "
+                "content_base64."
+            ),
         ] = None,
         file_path: Annotated[
             str | None,
@@ -406,7 +424,12 @@ def register(ctx: Context) -> None:
                 "the parser from it"
             )
 
-        existing = await find_by_name(dataset_id, filename)
+        if source == "url":
+            existing = []
+            for candidate in _web_document_names(filename):
+                existing += await find_by_name(dataset_id, candidate)
+        else:
+            existing = await find_by_name(dataset_id, filename)
         if existing and not replace_existing:
             raise ValueError(
                 f"a document named {filename!r} already exists "
@@ -415,12 +438,21 @@ def register(ctx: Context) -> None:
             )
 
         if source == "url":
-            doc = await client.call(
-                "POST",
-                f"/datasets/{dataset_id}/documents",
-                params={"type": "web"},
-                data={"name": filename, "url": url},
-            )
+            try:
+                doc = await client.call(
+                    "POST",
+                    f"/datasets/{dataset_id}/documents",
+                    params={"type": "web"},
+                    data={"name": filename, "url": url},
+                )
+            except RagflowError as exc:
+                if "not been supported" not in str(exc):
+                    raise
+                raise RagflowError(
+                    f"{exc}. RAGFlow removes the dots from the names of URL uploads and adds back "
+                    "only .pdf or .html, so other file types cannot come from a URL; download the "
+                    "file and upload it with text or content_base64"
+                ) from None
         else:
             mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
             data = await client.call(
@@ -436,10 +468,11 @@ def register(ctx: Context) -> None:
             await client.call(
                 "DELETE", f"/datasets/{dataset_id}/documents", json={"ids": replaced}
             )
-            if doc.get("name") != filename:
-                # RAGFlow renamed the upload to avoid the clash; restore the name.
+            # RAGFlow renamed the upload to avoid the clash; restore the old name.
+            target = existing[0]["name"] if source == "url" else filename
+            if doc.get("name") != target:
                 await client.call(
-                    "PATCH", f"/datasets/{dataset_id}/documents/{doc_id}", json={"name": filename}
+                    "PATCH", f"/datasets/{dataset_id}/documents/{doc_id}", json={"name": target}
                 )
         if meta_fields:
             await client.call(
