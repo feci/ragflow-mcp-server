@@ -153,9 +153,12 @@ def register(ctx: Context) -> None:
         try:
             data = await client.call("GET", f"/datasets/{dataset_id}/documents", params=params)
         except RagflowError as exc:
-            # An id or name filter without a match comes back as code 102 with an
-            # empty list ("you don't own the document ..."); report it as no match.
-            if exc.code == 102 and isinstance(exc.data, dict) and exc.data.get("docs") == []:
+            # An id or name filter without a match comes back as code 102 ("you
+            # don't own the document ...") with an empty list, or, in newer RAGFlow
+            # releases, with data null; report it as no match.
+            empty = isinstance(exc.data, dict) and exc.data.get("docs") == []
+            no_data = exc.data is None and "own the document" in str(exc)
+            if exc.code == 102 and (empty or no_data):
                 return {"total": 0, "docs": []}
             raise
         return data or {}

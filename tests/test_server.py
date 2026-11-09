@@ -94,6 +94,26 @@ async def test_upload_base64_without_parse(fake):
     assert not fake.sent("POST", "/datasets/k1/chunks")
 
 
+async def test_upload_text_when_ragflow_answers_null_data_for_no_match(fake):
+    # 2026-11-09: every upload of a new name failed with "you don't own the
+    # document" because the duplicate check treated this answer as an error.
+    def documents(request):
+        if request.url.params.get("name"):
+            return {"code": 102, "data": None, "message": "You don't own the document n.md."}
+        return ok({"docs": [doc(name="n.md")], "total": 1})
+
+    fake.on("GET", "/datasets/k1/documents", documents)
+    fake.on("POST", "/datasets/k1/documents", ok([doc(name="n.md")]))
+    payload(
+        await call(
+            make_server(fake),
+            "ragflow_upload_document",
+            {"dataset_id": "k1", "filename": "n.md", "text": "hello", "parse": False},
+        )
+    )
+    assert b"hello" in fake.sent("POST", "/datasets/k1/documents")[0].content
+
+
 @pytest.mark.parametrize(
     "args, message",
     [
@@ -284,6 +304,19 @@ async def test_name_filter_without_match_is_empty(fake):
     )
     result = payload(await call(make_server(fake), "ragflow_list_documents", {"dataset_id": "k1", "name": "x.md"}))
     assert result == {"total": 0, "documents": []}
+
+
+async def test_name_filter_without_match_and_null_data_is_empty(fake):
+    # RAGFlow 2026-11: code 102 with data null when a name filter has no match.
+    fake.on("GET", "/datasets/k1/documents", {"code": 102, "data": None, "message": "You don't own the document x.md."})
+    result = payload(await call(make_server(fake), "ragflow_list_documents", {"dataset_id": "k1", "name": "x.md"}))
+    assert result == {"total": 0, "documents": []}
+
+
+async def test_other_102_with_null_data_is_still_an_error(fake):
+    fake.on("GET", "/datasets/k1/documents", {"code": 102, "data": None, "message": "You don't own the dataset k1."})
+    result = await call(make_server(fake), "ragflow_list_documents", {"dataset_id": "k1", "name": "x.md"})
+    assert result.isError and "own the dataset" in result.content[0].text
 
 
 async def test_list_datasets_filters(fake):
